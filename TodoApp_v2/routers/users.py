@@ -1,39 +1,31 @@
 import sys
 sys.path.append("..")
 
+from starlette import status
 from starlette.responses import RedirectResponse
 
-from fastapi import Depends, HTTPException, status, APIRouter, Request, Response, Form
+from fastapi import Depends, APIRouter, Request,  Form
 from pydantic import BaseModel
 from typing import Optional
 import models
-from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 from database import SessionLocal, engine
-from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
-from datetime import datetime, timedelta
-from jose import jwt, JWTError
+
 
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
-from .auth import get_current_user, get_password_hash
-
-templates = Jinja2Templates(directory="templates")
+from .auth import get_current_user, get_password_hash, verify_password
 
 router = APIRouter(
     prefix="/users",
     tags=["users"],
-    responses={401: {"user": "Invalid user"}}
+    responses={404: {"description": "Not Found"}}
 )
 
+models.Base.metadata.create_all(bind=engine)
 
-class NewPasswordForm():
-    def __init__(self, request: Request):
-        self.request: Request = request
-        self.username: Optional[str] = None
-        self.password: Optional[str] = None
-        self.new_password: Optional[str] = None
+templates = Jinja2Templates(directory="templates")
 
 
 def get_db():
@@ -44,31 +36,44 @@ def get_db():
         db.close()
 
 
-@router.get("/", response_class=HTMLResponse)
-async def change_password(
+class UserVerification(BaseModel):
+    username: str
+    password: str
+    new_password: str
+
+
+@router.get("/edit-password", response_class=HTMLResponse)
+async def edit_user_view(request: Request):
+    user = await get_current_user(request)
+    if user is None:
+        return RedirectResponse(url="/auth", status_code=status.HTTP_302_FOUND)
+
+    return templates.TemplateResponse("edit-user-password.html", {"request": request, "user": user})
+
+
+@router.post("/edit-password", response_class=HTMLResponse)
+async def user_password_change(
         request: Request,
         username: str = Form(...),
         password: str = Form(...),
-        new_password: str = Form(...),
+        password2: str = Form(...),
         db: Session = Depends(get_db)
 ):
-    # user = await get_current_user(request)
-    #
-    # if user is None:
-    #     return RedirectResponse(url="/auth", status_code=status.HTTP_302_FOUND)
+    user = await get_current_user(request)
+    if user is None:
+        return RedirectResponse(url="/auth", status_code=status.HTTP_302_FOUND)
 
-    user = db.query(models.Users).filter(models.Users.username == username).first()
-    hashed_password = get_password_hash(password)
+    user_data = db.query(models.Users).filter(models.Users.username == username).first()
 
-    if user.hashed_password != hashed_password or user is None:
-        msg = "Incorrect Username or Password"
-        return templates.TemplateResponse("ui.html", {"request": request, "msg": msg})
-    else:
-        hashed_new_password = get_password_hash(new_password)
-        user.hashed_password = hashed_new_password
+    msg = "Invalid username or password"
 
-    db.add(user)
-    db.commit()
+    if user_data is not None:
+        if username == user_data.username and verify_password(password, user_data.hashed_password):
+            user_data.hashed_password = get_password_hash(password2)
+            db.add(user_data)
+            db.commit()
+            msg = "Password updated"
 
-    msg = "Password successfully changed"
-    return templates.TemplateResponse("ui.html", {"request": request, "msg": msg})
+    return templates.TemplateResponse(
+        "edit-user-password.html", {"request": request, "user": user, "msg": msg}
+    )
